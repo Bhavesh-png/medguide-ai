@@ -78,6 +78,38 @@ async def startup_db_client():
         memory=session_memory
     )
 
+    # Seed default admin user so login always works
+    await seed_default_admin()
+
+async def seed_default_admin():
+    """Creates the default admin/admin user in MongoDB if it doesn't exist yet."""
+    if not db_client:
+        return  # No DB — bypass mode handles it
+    try:
+        db = db_client.get_database("medguide")
+        users = db.get_collection("users")
+        existing = await users.find_one({"username": "admin"})
+        if not existing:
+            hashed_pwd = get_password_hash("admin")
+            await users.insert_one({
+                "username": "admin",
+                "hashed_password": hashed_pwd,
+                "created_at": datetime.utcnow(),
+                "role": "admin"
+            })
+            # Default consents for admin
+            await consent_manager.update_consent("admin", {
+                "calendar_access": True,
+                "chat_history_storage": True,
+                "emergency_escalation_data": True,
+                "audit_logging": True
+            })
+            logger.info("✅ Default admin user created (username: admin, password: admin)")
+        else:
+            logger.info("ℹ️  Admin user already exists in database.")
+    except Exception as e:
+        logger.error(f"Failed to seed admin user: {e}")
+
 @app.on_event("shutdown")
 async def shutdown_db_client():
     global db_client, mcp_client
@@ -148,12 +180,26 @@ async def register(user: RegisterSchema):
 
 @app.post("/api/auth/login")
 async def login(user: LoginSchema):
+    # Always allow admin/admin as demo bypass (works with or without DB)
+    if user.username == "admin" and user.password == "admin":
+        if db_client:
+            # Try real DB first so audit log is recorded
+            try:
+                db = db_client.get_database("medguide")
+                users_col = db.get_collection("users")
+                existing = await users_col.find_one({"username": "admin"})
+                if existing and verify_password(user.password, existing["hashed_password"]):
+                    token = create_access_token({"sub": str(existing["_id"]), "username": "admin"})
+                    await audit_logger.log_action("admin", "user_login")
+                    return {"access_token": token, "token_type": "bearer", "username": "admin"}
+            except Exception:
+                pass
+        # Fallback: issue token directly (mock mode or seed not yet run)
+        token = create_access_token({"sub": "admin", "username": "admin"})
+        return {"access_token": token, "token_type": "bearer", "username": "admin"}
+
     if not db_client:
-        # Development mode bypass if DB fails
-        if user.username == "admin" and user.password == "admin":
-            token = create_access_token({"sub": "admin", "username": "admin"})
-            return {"access_token": token, "token_type": "bearer", "username": "admin"}
-        raise HTTPException(status_code=500, detail="Database connection not available")
+        raise HTTPException(status_code=503, detail="Database unavailable. Use admin/admin for demo access.")
         
     db = db_client.get_database("medguide")
     users = db.get_collection("users")
