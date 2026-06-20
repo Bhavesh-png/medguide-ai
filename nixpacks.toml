@@ -1,8 +1,8 @@
 [phases.setup]
-nixPkgs = ["python312", "python312Packages.pip"]
+nixPkgs = ["python312", "python312Packages.pip", "python312Packages.uv"]
 
 [phases.install]
-cmds = ["pip install -r requirements.txt"]
+cmds = ["uv pip install -r requirements.txt"]
 
 [start]
 cmd = "uvicorn backend.app:app --host 0.0.0.0 --port $PORT"
